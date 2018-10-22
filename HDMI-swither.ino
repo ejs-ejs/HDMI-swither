@@ -2,10 +2,15 @@
 #include <Bounce2.h>
 #define T_DEBOUNCE 200
 
+char __VERSION[] = "0.1b"; // version
+
+// command inteface
+#include <SerialCommand.h>
+
 #include "key_digital.h"
 
 //This includes everything. Not generally recommended.
-#include <IRLibAll.h>
+//#include <IRLibAll.h>
 
 // collect the IRLib2 stack
 #include <IRLibDecodeBase.h>  //We need both the coding and sending
@@ -19,17 +24,23 @@
 #include <IRLib_P01_NEC.h>
 
 // Include a receiver either this or IRLibRecvPCI or IRLibRecvLoop
-#include <IRLibRecv.h>
+#include <IRLibRecvPCI.h>
+
 
 #include <IRLibCombo.h>     // After all protocols, include this
 // All of the above automatically creates a universal sending
 // class called "IRsend" containing only the protocols you want.
 // Now declare an instance of that sender.
 
+//#include <IRLibAll.h>
+
 #include <Wire.h>
 
 
 IRsend mySender;
+
+SerialCommand sCmd;     // The SerialCommand object
+
 
 //#define I2C_LCD_ADDR 0x20
 //#define I2C_LCD_ADDR 0x27
@@ -60,12 +71,13 @@ typedef struct {
   char cmdRS232[13]; // RS-232 command to activate
   unsigned int cmdIR; // IR command to activate
   unsigned int vendorPrefixIR; // IR vendor prefix of the output
-  char Protocol[9]; // IR protocol
+  // char Protocol[9]; // IR protocol
+  byte Protocol; // IR protocol
 } Output;
 
 LiquidCrystal_PCF8574 lcd(I2C_LCD_ADDR);
 Device cDevice;
-IRrecv myReceiver(IRRECEIVER); //create receiver and pass pin number
+IRrecvPCI myReceiver(IRRECEIVER); //create receiver and pass pin number
 IRdecode myDecoder;   //create decoder
 
 short haveLCD = 0;
@@ -81,6 +93,7 @@ unsigned long tRunning, tWake;
 Output outputs[NUM_CMDS];
 
 unsigned int cKey = 0;
+unsigned int cOutput = 0; // current output for command interface
 
 // define the physical connection of buttons to the pins in the array
 // Keys[0] is the button #1
@@ -89,7 +102,19 @@ unsigned int Keys[] = {12, 9, 10, 11};
 
 unsigned long previousMillis = 0;        // will store last time push button occured
 
+// from https://arduino.stackexchange.com/questions/13165/how-to-read-pinmode-for-digital-pin
+int pinMode(uint8_t pin)
+{
+  if (pin >= NUM_DIGITAL_PINS) return (-1);
 
+  uint8_t bit = digitalPinToBitMask(pin);
+  uint8_t port = digitalPinToPort(pin);
+  volatile uint8_t *reg = portModeRegister(port);
+  if (*reg & bit) return (OUTPUT);
+
+  volatile uint8_t *out = portOutputRegister(port);
+  return ((*out & bit) ? INPUT_PULLUP : INPUT);
+}
 
 /* update button states
     store them in the global variable
@@ -123,6 +148,15 @@ void reportLCD() {
   lcd.print(outputs[cKey].Name);
 }
 
+void nextKey() {
+  byte gotOutput = 0;
+      while (!gotOutput) {
+        cKey = (cKey == NUM_CMDS - 1) ? 0 : cKey + 1;
+        if (outputs[cKey].Active) {
+          gotOutput = 1;
+        }
+      }
+  }
 
 void setup() {
   int error;
@@ -143,6 +177,8 @@ void setup() {
       Serial.print(" to ");
       Serial.println(Keys[n], DEC);
     }
+    Serial.print(F("Pin 3 is "));
+    pinMode(IRLED)?Serial.println("OUTPUT"):Serial.println("INPUT");
   }
 
 
@@ -182,37 +218,61 @@ void setup() {
   strcpy(outputs[0].Name, "Computer");
   outputs[0].cmdIR = KEY_DIGITAL_INPUT_1;
   outputs[0].vendorPrefixIR = KEY_DIGITAL_PREFIX;
-  strcpy(outputs[0].Protocol, "NEC");
+  //strcpy(outputs[0].Protocol, NEC);
+ outputs[0].Protocol=NEC;
 
   outputs[1].Active = 1;
   strcpy(outputs[1].Name, "HDMI");
   outputs[1].cmdIR = KEY_DIGITAL_INPUT_2;
   outputs[1].vendorPrefixIR = KEY_DIGITAL_PREFIX;
-  strcpy(outputs[1].Protocol, "NEC");
+  //strcpy(outputs[1].Protocol, NEC);
+  outputs[1].Protocol=NEC;
 
   outputs[2].Active = 1;
   strcpy(outputs[2].Name, "VGA");
   outputs[2].cmdIR = KEY_DIGITAL_INPUT_3;
   outputs[2].vendorPrefixIR = KEY_DIGITAL_PREFIX;
-  strcpy(outputs[2].Protocol, "NEC");
+  //strcpy(outputs[2].Protocol, NEC);
+  outputs[2].Protocol=NEC;
+
 
   outputs[3].Active = 0;
   strcpy(outputs[3].Name, "N/A");
   outputs[3].cmdIR = KEY_DIGITAL_INPUT_4;
   outputs[3].vendorPrefixIR = KEY_DIGITAL_PREFIX;
-  strcpy(outputs[3].Protocol, "NEC");
+  //strcpy(outputs[3].Protocol, NEC);
+  outputs[3].Protocol=NEC;
+
 
   pattern = long(outputs[cKey].vendorPrefixIR) << 16 | outputs[cKey].cmdIR;
   mySender.send(outputs[cKey].Protocol, pattern, 32); // send info to beamer
-
+ 
   if (haveLCD) {
     reportLCD();
   }
+  nextKey();
+
+  // Setup callbacks for SerialCommand commands
+  sCmd.addCommand("SELECT",    CMD_output_select);          // select output for manipulations
+  sCmd.addCommand("ENABLE",   CMD_output_enable);         // enable output
+  sCmd.addCommand("DISABLE",   CMD_output_disable);         // disable output
+  sCmd.addCommand("NAME",   CMD_output_name);         // name output
+  sCmd.addCommand("STATE",   CMD_state);         // print state to serial port
+  sCmd.addCommand("LEARN",   CMD_learn);         // learn the IR code rom print state to serial port
+  sCmd.addCommand("SWITCH",   CMD_switch);         // switch to teh selected input
+  sCmd.addCommand("?", CMD_help);        // help un use
+//  sCmd.addCommand("S",     CMD_process);  // switch manipulation commands
+  //sCmd.addCommand("P",     CMD_profiles);  // profile manipulation commands
+//  sCmd.setDefaultHandler(CMD_any);      // Handler for command that isn't matched
+
 
 }
 
 void loop() {
 
+// read serial port
+  sCmd.readSerial();
+  
   // update buttons
   buttonState();
   // Serial.print(F(" DEBUG: StateMachine: "));
@@ -228,8 +288,12 @@ void loop() {
       // save the last time you blinked the LED
       previousMillis = currentMillis;
       // do al lthe dirty job
+
+
       pattern = long(outputs[cKey].vendorPrefixIR) << 16 | outputs[cKey].cmdIR;
       mySender.send(outputs[cKey].Protocol, pattern, 32); // send info to beamer
+   
+      
       if (cDevice.Debug) {
         Serial.print(F("Switching input #"));
         Serial.print(cKey + 1);
@@ -242,40 +306,8 @@ void loop() {
         reportLCD();
       }
       stateMachine = stateMachine ^ 1; // clear the 1st bit
-      byte gotCOutput = 0;
-      while (!gotCOutput) {
-        cKey = (cKey == NUM_CMDS - 1) ? 0 : cKey + 1;
-        if (outputs[cKey].Active) {
-          gotCOutput = 1;
-        }
-      }
+      nextKey();
       infoLED(0);
     }
-  }
-
-
-  //Continue looping until you get a complete signal received
-  if (myReceiver.getResults()) {
-    myDecoder.decode();           //Decode it
-    if ( myDecoder.value && (myDecoder.value < 0xFFFFFFFF)) {
-      if (cDevice.Debug) {
-        Serial.print(F("IR: received signal "));
-        Serial.println(myDecoder.value);
-        //myDecoder.dumpResults(true);  //Now print results. Use false for less detail
-        myDecoder.dumpResults(false);
-
-        if (haveLCD) {
-          lcd.clear();//Clean the screen
-          lcd.setCursor(1, 0);
-          lcd.print(F("Received:"));
-          lcd.setCursor(0, 1);
-          lcd.print(F("[0x"));
-          lcd.print(myDecoder.value, HEX);
-          lcd.print(F("]"));
-        }
-      }
-
-    }
-    myReceiver.enableIRIn();      //Restart receiver
   }
 }
